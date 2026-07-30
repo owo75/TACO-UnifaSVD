@@ -1,0 +1,15 @@
+# Build artifacts
+*.o
+UnifaSVD
+cusolverDnXgesvd
+cusolverDnXgesvdr
+
+# Editor/IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
