@@ -1,0 +1,10 @@
+# Keep CUDA sources, build files and datasets consistent across platforms.
+* text=auto
+*.cu text eol=lf
+*.h text eol=lf
+*.md text eol=lf
+*.py text eol=lf
+*.txt text eol=lf
+Makefile text eol=lf
+.gitignore text eol=lf
+.gitattributes text eol=lf

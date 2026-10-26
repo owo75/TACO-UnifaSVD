@@ -7,10 +7,37 @@
 #include <fstream>
 #include <cstdio>
 #include <sstream>
+#include <algorithm>
+#include <cmath>
+#include <exception>
 #include <cuda_runtime.h>
 
 enum class MatrixFileFormat { Text = 0, Binary = 1, LibSVM = 2 };
 enum class MatrixFileLayout { RowMajor = 0, ColumnMajor = 1 };
+
+// A LIBSVM label is ignored; each remaining token must be index:value.
+// Report malformed data instead of allowing conversion exceptions to escape.
+inline bool parse_libsvm_feature(const std::string& token, const std::string& path,
+                                long int& feature, double& value)
+{
+    const size_t colon = token.find(':');
+    if (colon != std::string::npos && colon > 0 && colon + 1 < token.size()) {
+        try {
+            size_t index_end = 0, value_end = 0;
+            const std::string index_text = token.substr(0, colon);
+            const std::string value_text = token.substr(colon + 1);
+            feature = std::stol(index_text, &index_end);
+            value = std::stod(value_text, &value_end);
+            if (index_end == index_text.size() && value_end == value_text.size() &&
+                feature > 0 && std::isfinite(value)) return true;
+        } catch (const std::exception&) {
+            // Invalid and out-of-range numeric fields share the same diagnostic.
+        }
+    }
+    std::fprintf(stderr, "[Error] Invalid LIBSVM token '%s' in '%s'.\n",
+                 token.c_str(), path.c_str());
+    return false;
+}
 
 template<typename T>
 inline bool read_matrix_text(const std::string& path, size_t expected_elems, std::vector<T>& values)
@@ -114,18 +141,10 @@ inline bool infer_libsvm_shape(const std::string& path,
                 skipped_label = true;
                 continue;
             }
-            const size_t colon = token.find(':');
-            if (colon == std::string::npos || colon == 0 || colon + 1 >= token.size()) {
-                std::printf("[Error] Invalid LIBSVM token '%s' in '%s'.\n", token.c_str(), path.c_str());
-                return false;
-            }
-            const long int feat = std::stol(token.substr(0, colon));
-            if (feat <= 0) {
-                std::printf("[Error] Invalid non-positive feature index %ld in '%s'.\n", feat, path.c_str());
-                return false;
-            }
+            long int feat = 0;
+            double value = 0.0;
+            if (!parse_libsvm_feature(token, path, feat, value)) return false;
             if (feat > cols) cols = feat;
-            (void)std::stod(token.substr(colon + 1));
         }
         if (!iss.eof()) {
             std::printf("[Error] Parsing LIBSVM file '%s' failed while inferring shape.\n", path.c_str());
@@ -158,36 +177,28 @@ inline bool read_matrix_libsvm(const std::string& path,
     std::string line;
     long int row = 0;
     while (std::getline(ifs, line)) {
+        std::istringstream iss(line);
+        std::string token;
+        if (!(iss >> token)) continue;  // Match shape inference: skip blank lines.
         if (row >= rows_input) {
             std::printf("[Error] LIBSVM file '%s' has more rows than expected (%ld).\n", path.c_str(), rows_input);
             return false;
         }
-        std::istringstream iss(line);
-        std::string token;
-        bool skipped_label = false;
         while (iss >> token) {
-            if (!skipped_label) {
-                skipped_label = true;
-                continue;
-            }
-            const size_t colon = token.find(':');
-            if (colon == std::string::npos || colon == 0 || colon + 1 >= token.size()) {
-                std::printf("[Error] Invalid LIBSVM token '%s' in '%s'.\n", token.c_str(), path.c_str());
-                return false;
-            }
-            const long int feat = std::stol(token.substr(0, colon));
+            long int feat = 0;
+            double value = 0.0;
+            if (!parse_libsvm_feature(token, path, feat, value)) return false;
             if (feat <= 0 || feat > cols) {
                 std::printf("[Error] Feature index %ld out of range [1, %ld] in '%s'.\n", feat, cols, path.c_str());
                 return false;
             }
-            const double value = std::stod(token.substr(colon + 1));
             host_col[(size_t)(feat - 1) * (size_t)rows_padded + (size_t)row] = static_cast<T>(value);
         }
         if (!iss.eof()) {
             std::printf("[Error] Parsing LIBSVM file '%s' failed.\n", path.c_str());
             return false;
         }
-        if (skipped_label) ++row;
+        ++row;
     }
 
     if (row != rows_input) {
@@ -225,7 +236,7 @@ inline bool load_matrix_from_file(cudaStream_t stream,
                                   MatrixFileLayout layout,
                                   thrust::device_vector<T>& d_out)
 {
-    if (rows_input <= 0 || cols <= 0 || rows_padded <= 0) {
+    if (rows_input <= 0 || cols <= 0 || rows_padded < rows_input) {
         std::printf("[Error] Invalid matrix dimensions when loading user matrix (rows=%ld, padded_rows=%ld, cols=%ld).\n",
                    rows_input, rows_padded, cols);
         return false;

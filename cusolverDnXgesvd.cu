@@ -1,4 +1,6 @@
-#include <iostream> 
+// Full-SVD benchmark. Half/BF16 modes quantize inputs and time output casts;
+// the cuSOLVER factorization itself uses FP32.
+#include <iostream>
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
@@ -20,6 +22,7 @@
 #include <cstring>
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
+#include "src/cli_utils.h"
 
 long int m, n, rank;
 enum class PrecisionMode { Float32, Half16, BFloat16 };
@@ -61,20 +64,25 @@ float s_max;
 float s_min;
 int parseArguments(int argc,char *argv[])
 {
-    if(argc < 7)
+    const bool show_help = cli::help_requested(argc, argv);
+    if(argc < 7 || show_help)
     {
         printf("Usage: %s <m> <n> <rank> <spectrum_type> <s_max> <s_min> [--precision=<float|half|bfloat16>]\n", argv[0]);
         printf("  <spectrum_type>: 'geometric', 'uniform', 'cluster0', 'cluster1', 'arithmetic', 'normal'\n");
         printf("  <s_max>: Maximum singular value (e.g., 1.0)\n");
         printf("  <s_min>: Minimum singular value (e.g., 1e-10)\n");
+        return show_help ? 1 : -1;
+    }
+    if (!cli::positive_integer(argv[1], "m", m) ||
+        !cli::positive_integer(argv[2], "n", n) ||
+        !cli::positive_integer(argv[3], "rank", rank) ||
+        !cli::positive_real(argv[5], "s_max", s_max) ||
+        !cli::positive_real(argv[6], "s_min", s_min)) return -1;
+    spectrum_type = argv[4];
+    if (m < n || rank > std::min(m, n) || s_max < s_min) {
+        std::fprintf(stderr, "Error: require m >= n, rank <= min(m,n), and s_max >= s_min.\n");
         return -1;
     }
-    m = atol(argv[1]);
-    n = atol(argv[2]);
-    rank = atol(argv[3]);
-    spectrum_type = argv[4];
-    s_max = atof(argv[5]);
-    s_min = atof(argv[6]);
 
     for (int i = 7; i < argc; ++i) {
         std::string arg = argv[i];
@@ -92,7 +100,8 @@ int parseArguments(int argc,char *argv[])
                 return -1;
             }
         } else {
-            printf("Warning: Unrecognized argument '%s' (ignored).\n", arg.c_str());
+            std::fprintf(stderr, "Error: Unrecognized argument '%s'. Use --help for usage.\n", arg.c_str());
+            return -1;
         }
     }
     
@@ -227,13 +236,11 @@ float stopTimer()
 
 int main(int argc,char *argv[])
 {
-    if(parseArguments(argc, argv)==-1)
-        return 0;
-    bool stop_condition_met = false;
+    const int parse_status = parseArguments(argc, argv);
+    if (parse_status != 0) return parse_status > 0 ? EXIT_SUCCESS : EXIT_FAILURE;
     const size_t mn = std::min(m, n);
     std::cout << "Constant mn: " << mn << std::endl;
     const size_t real_rank = rank; 
-    int current_m = m; 
     printf("Creating a large low-rank matrix of size %ld x %ld with rank %ld.\n", m, n, real_rank);
 
     cublasHandle_t cublasHandle;
@@ -244,7 +251,6 @@ int main(int argc,char *argv[])
     float one = 1.0f;
     float zero = 0.0f;
     float minus_one = -1.0f;
-    size_t accumulated_rank = 0;
     // 创建唯一的随机数生成器
     curandGenerator_t main_gen;
     curandCreateGenerator(&main_gen, CURAND_RNG_PSEUDO_DEFAULT);

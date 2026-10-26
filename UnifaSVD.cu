@@ -1,4 +1,6 @@
-#include <iostream> 
+// UnifaSVD benchmark: synthetic/file input, adaptive QB reduction and SVD.
+// eps controls panel truncation; it is not a final reconstruction-error bound.
+#include <iostream>
 #include <cuda.h>
 #include <cublas_v2.h>
 #include <curand.h>
@@ -36,6 +38,7 @@
 #include "src/QB.h"
 #include "src/my_cuda_kernels_extras.cu"
 #include "src/matrix_io.h"
+#include "src/cli_utils.h"
 
 
 
@@ -46,24 +49,23 @@ float s_max;
 float s_min;
 std::string precision_str; 
 bool debug_mode = false;
-bool fast_mode = false; // --fast：速度优先，float 路径尽量保持纯 float 内部计算
+bool fast_mode = false; // Prefer FP32 internal operations for float runs.
 static constexpr double kRFinalQrRatioThreshold = 1.0; // n/final_rank 超过该阈值时跳过 Step4 QR
 
 
-// 基于 EVD 的 SVD 精度等级控制（影响是否触发二次 EVD 等）
+// Controls refinement checks in the eigenvalue-based SVD path.
 enum class AccuracyLevel { Low = 0, Medium = 1, High = 2 };
-static AccuracyLevel g_accuracy = AccuracyLevel::Medium; // 默认中等精度
+static AccuracyLevel g_accuracy = AccuracyLevel::Medium;
 
-// 秩类型控制（用于路径选择/调度）
+// Rank classification used to select the direct or QB path.
 enum class RankType { Unknown = 0, Full = 1, Low = 2 };
 static RankType g_rank_type = RankType::Unknown;
 
-// 验证相关控制
-// Padding 控制
+// Pad matrix rows when needed by the TSQR kernels.
 static bool g_padding_enabled = true;
-// 面板秩截断控制（调试/分析场景下可强制保留完整面板）
+// Fixed-rank runs keep full panels unless --allow-rank-drop is requested.
 static bool g_force_full_rank = true;
-// Unknown-rank / adaptive-stop 控制
+// Unknown-rank mode uses rank as an upper bound and enables adaptive stopping.
 static bool g_unknown_rank_mode = false;
 static bool g_unknown_rank_stage2 = false;
 static bool g_energy_criterion_enabled = false;
@@ -71,9 +73,9 @@ static double g_energy_tau = -1.0;
 static bool g_tail_criterion_enabled = false;
 static double g_tail_norm_eps = -1.0;
 
-// 奇异值/奇异向量计算模式控制，支持 U_Only 与 Vt_Only
+// Select singular values and the requested singular vectors.
 enum class ComputeVectors { S_Only = 0, U_Only = 1, Vt_Only = 2, US = 3, SVt = 4, All = 5 };
-static ComputeVectors g_compute_vectors = ComputeVectors::All; // 默认：计算 U 和 V
+static ComputeVectors g_compute_vectors = ComputeVectors::All;
 
 // 是否需要计算任一奇异向量（U 或 V）
 static inline bool need_vectors() { return g_compute_vectors != ComputeVectors::S_Only; }
@@ -392,7 +394,8 @@ static MatrixFileLayout g_matrix_file_layout = MatrixFileLayout::RowMajor;
 
 int parseArguments(int argc,char *argv[])
 {
-    if(argc < 2)
+    const bool show_help = cli::help_requested(argc, argv);
+    if(argc < 2 || show_help)
     {
         printf("Usage (generated matrix): %s <m> <n> <k> <rank|auto> <eps> <spectrum_type> <s_max> <s_min> <precision_str> [--debug] [--fast] [--accuracy=<low|medium|high>] [--vectors=<S|U|Vt|US|SVt|All>] [--unknown-rank] [--energy-tol=<tau>] [--tail-norm-eps=<eps>]\n", argv[0]);
         printf("Usage (matrix file)    : %s <m|auto> <n|auto> <k> <rank|auto> <eps> <precision_str> --matrix-file=<path> [--matrix-format=text|binary|libsvm] [--matrix-layout=row|col] [--debug] [--fast] [--accuracy=<low|medium|high>] [--vectors=<...>] [--unknown-rank] [--energy-tol=<tau>] [--tail-norm-eps=<eps>]\n", argv[0]);
@@ -417,7 +420,7 @@ int parseArguments(int argc,char *argv[])
         printf("  For --matrix-file, spectrum_type/s_max/s_min are omitted.\n");
         printf("  For text/libsvm matrix files, m and n default to auto and are inferred from the file.\n");
         printf("  For binary matrix files, m and n must be provided explicitly.\n");
-        return -1;
+        return show_help ? 1 : -1;
     }
     std::vector<char*> pos_args; 
     bool force_full_rank_explicit = false;
@@ -450,7 +453,11 @@ int parseArguments(int argc,char *argv[])
             std::transform(val.begin(), val.end(), val.begin(), ::tolower);
             if (val == "low" || val == "fast") g_accuracy = AccuracyLevel::Low;
             else if (val == "high" || val == "full") g_accuracy = AccuracyLevel::High;
-            else g_accuracy = AccuracyLevel::Medium;
+            else if (val == "medium") g_accuracy = AccuracyLevel::Medium;
+            else {
+                std::fprintf(stderr, "Error: --accuracy requires low, medium, or high.\n");
+                return -1;
+            }
         } else if (arg == "--force-full-rank") {
             g_force_full_rank = true;
             force_full_rank_explicit = true;
@@ -461,11 +468,15 @@ int parseArguments(int argc,char *argv[])
             g_unknown_rank_mode = true;
             g_rank_type = RankType::Unknown;
         } else if (arg.rfind("--energy-tol=", 0) == 0 || arg.rfind("-energy-tol=", 0) == 0) {
-            g_energy_tau = atof(arg.substr(arg.find('=') + 1).c_str());
-            g_energy_criterion_enabled = (g_energy_tau > 0.0);
+            if (!cli::positive_real(arg.substr(arg.find('=') + 1), "--energy-tol", g_energy_tau)) return -1;
+            if (g_energy_tau >= 1.0) {
+                std::fprintf(stderr, "Error: --energy-tol must be less than 1.\n");
+                return -1;
+            }
+            g_energy_criterion_enabled = true;
         } else if (arg.rfind("--tail-norm-eps=", 0) == 0 || arg.rfind("-tail-norm-eps=", 0) == 0) {
-            g_tail_norm_eps = atof(arg.substr(arg.find('=') + 1).c_str());
-            g_tail_criterion_enabled = (g_tail_norm_eps > 0.0);
+            if (!cli::positive_real(arg.substr(arg.find('=') + 1), "--tail-norm-eps", g_tail_norm_eps)) return -1;
+            g_tail_criterion_enabled = true;
         } else if (arg == "--matrix-file" || arg == "-matrix-file") {
             if (i + 1 < argc) {
                 g_use_custom_matrix = true;
@@ -512,7 +523,7 @@ int parseArguments(int argc,char *argv[])
             if (i + 1 < argc) {
                 std::string val = argv[++i];
                 std::transform(val.begin(), val.end(), val.begin(), ::tolower);
-                g_padding_enabled = (val != "off" && val != "0" && val != "false");
+                if (!cli::boolean(val, g_padding_enabled)) return -1;
             } else {
                 printf("[Error] --padding requires a value (on/off).\n");
                 return -1;
@@ -520,7 +531,7 @@ int parseArguments(int argc,char *argv[])
         } else if (arg.rfind("--padding=", 0) == 0) {
             std::string val = arg.substr(10);
             std::transform(val.begin(), val.end(), val.begin(), ::tolower);
-            g_padding_enabled = (val != "off" && val != "0" && val != "false");
+            if (!cli::boolean(val, g_padding_enabled)) return -1;
         } else if (arg == "--S" || arg == "-S") {
             g_compute_vectors = ComputeVectors::S_Only;
         } else if (arg == "--U" || arg == "-U") {
@@ -541,7 +552,14 @@ int parseArguments(int argc,char *argv[])
             else if (val == "vt" || val == "vt_only" || val == "vt-only" || val == "vtonly" || val == "v^t") g_compute_vectors = ComputeVectors::Vt_Only;
             else if (val == "us") g_compute_vectors = ComputeVectors::US;
             else if (val == "svt" || val == "sv^t") g_compute_vectors = ComputeVectors::SVt;
-            else g_compute_vectors = ComputeVectors::All;
+            else if (val == "all") g_compute_vectors = ComputeVectors::All;
+            else {
+                std::fprintf(stderr, "Error: --vectors requires S, U, Vt, US, SVt, or All.\n");
+                return -1;
+            }
+        } else if (!arg.empty() && arg[0] == '-') {
+            std::fprintf(stderr, "Error: Unrecognized option '%s'. Use --help for usage.\n", arg.c_str());
+            return -1;
         } else {
             pos_args.push_back(argv[i]);
         }
@@ -550,8 +568,13 @@ int parseArguments(int argc,char *argv[])
     const bool custom_matrix = g_use_custom_matrix;
     const bool provided_full_params = !custom_matrix;
 
-    if (!custom_matrix && pos_args.size() < 9) {
-        printf("Error: Missing required arguments. Found %zu, expected at least 9.\n", pos_args.size());
+    if ((!custom_matrix && pos_args.size() != 9) || (custom_matrix && pos_args.size() > 6)) {
+        printf("Error: Expected 9 positional arguments for generated input or at most 6 for file input; got %zu.\n", pos_args.size());
+        return -1;
+    }
+    if (!custom_matrix && (!named_m.empty() || !named_n.empty() || !named_k.empty() ||
+        !named_rank.empty() || !named_eps.empty() || !named_precision.empty())) {
+        std::fprintf(stderr, "Error: Named dimension/rank/precision options require --matrix-file.\n");
         return -1;
     }
 
@@ -600,23 +623,24 @@ int parseArguments(int argc,char *argv[])
     }
     const bool m_auto_arg = is_auto_token(m_arg);
     const bool n_auto_arg = is_auto_token(n_arg);
-    m = m_auto_arg ? 0 : atol(m_arg.c_str());
-    n = n_auto_arg ? 0 : atol(n_arg.c_str());
-    k = atol(k_arg.c_str());
+    m = n = 0;
+    if ((!m_auto_arg && !cli::positive_integer(m_arg, "m", m)) ||
+        (!n_auto_arg && !cli::positive_integer(n_arg, "n", n)) ||
+        !cli::positive_integer(k_arg, "k", k)) return -1;
     const bool rank_auto_arg = is_auto_token(rank_arg);
     if (rank_auto_arg) {
         g_unknown_rank_mode = true;
         g_rank_type = RankType::Unknown;
         rank = 0;
     } else {
-        rank = atol(rank_arg.c_str());
+        if (!cli::positive_integer(rank_arg, "rank", rank)) return -1;
     }
-    eps = atof(eps_arg.c_str());
+    if (!cli::positive_real(eps_arg, "eps", eps)) return -1;
 
     if (provided_full_params) {
         spectrum_type = pos_args[5];
-        s_max = atof(pos_args[6]);
-        s_min = atof(pos_args[7]);
+        if (!cli::positive_real(pos_args[6], "s_max", s_max) ||
+            !cli::positive_real(pos_args[7], "s_min", s_min)) return -1;
         precision_str = precision_arg;
     } else {
         spectrum_type = "custom";
@@ -727,8 +751,8 @@ int parseArguments(int argc,char *argv[])
     printf("  Vectors: %s\n\n", vstr);
     
     bool has_error = false;
-    if (m <= 0 || n <= 0 || k <= 0 || rank <= 0) {
-        printf("Error: Matrix dimensions (m, n, k, rank) must be positive.\n");
+    if (m <= 0 || n <= 0 || m > INT_MAX || n > INT_MAX || k <= 0 || rank <= 0) {
+        printf("Error: Matrix dimensions must be in [1, INT_MAX]; k and rank must be positive.\n");
         has_error = true;
     }
     if (rank > std::min(m, n)) {
@@ -6441,9 +6465,8 @@ void DirectSVD(cublasHandle_t cublasHandle, cusolverDnHandle_t cusolverHandle, c
 
 int main(int argc, char *argv[])
 {
-    if (parseArguments(argc, argv) == -1) {
-        return 1;
-    }
+    const int parse_status = parseArguments(argc, argv);
+    if (parse_status != 0) return parse_status > 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 
     cublasHandle_t cublasHandle;
     CUDA_CHECK(cudaFree(0));

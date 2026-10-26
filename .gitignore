@@ -1,5 +1,6 @@
 # Build artifacts
 *.o
+*.d
 UnifaSVD
 cusolverDnXgesvd
 cusolverDnXgesvdr
@@ -13,3 +14,8 @@ cusolverDnXgesvdr
 
 # OS
 .DS_Store
+
+# Python test artifacts
+__pycache__/
+*.pyc
+tests/test_matrix_io

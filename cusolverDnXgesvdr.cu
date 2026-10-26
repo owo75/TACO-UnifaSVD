@@ -1,4 +1,6 @@
-#include <iostream> 
+// Randomized-SVD benchmark. Half/BF16 modes quantize inputs and time output
+// casts; the cuSOLVER factorization itself uses FP32.
+#include <iostream>
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
@@ -21,6 +23,7 @@
 #include <cuda_bf16.h>
 #include <cstring>
 #include "src/matrix_io.h"
+#include "src/cli_utils.h"
 
 long int m, n, rank;
 enum class PrecisionMode { Float32, Half16, BFloat16 };
@@ -68,7 +71,8 @@ float s_min;
 int g_niters = 10;
 int parseArguments(int argc,char *argv[])
 {
-    if(argc < 2)
+    const bool show_help = cli::help_requested(argc, argv);
+    if(argc < 2 || show_help)
     {
         printf("Usage (generated matrix): %s <m> <n> <rank|auto> <spectrum_type> <s_max> <s_min> [--precision=<float|half|bfloat16>] [--niters=<N>]\n", argv[0]);
         printf("Usage (matrix file)    : %s <m|auto> <n|auto> <rank|auto> --matrix-file=<path> [--matrix-format=text|binary|libsvm] [--matrix-layout=row|col] [--precision=<float|half|bfloat16>] [--niters=<N>]\n", argv[0]);
@@ -76,7 +80,7 @@ int parseArguments(int argc,char *argv[])
         printf("  <s_max>: Maximum singular value (e.g., 1.0)\n");
         printf("  <s_min>: Minimum singular value (e.g., 1e-10)\n");
         printf("  --niters=<N>: Power iterations for cusolverDnXgesvdr (default 10)\n");
-        return -1;
+        return show_help ? 1 : -1;
     }
     std::vector<std::string> pos_args;
     for (int i = 1; i < argc; ++i) {
@@ -133,12 +137,12 @@ int parseArguments(int argc,char *argv[])
             }
         } else if (arg.rfind("--niters=", 0) == 0) {
             std::string val = arg.substr(strlen("--niters="));
-            long parsed = atol(val.c_str());
-            if (parsed <= 0) {
-                printf("Error: --niters must be a positive integer, got '%s'.\n", val.c_str());
-                return -1;
-            }
+            long parsed = 0;
+            if (!cli::positive_integer(val, "--niters", parsed)) return -1;
             g_niters = (int)parsed;
+        } else if (!arg.empty() && arg[0] == '-') {
+            std::fprintf(stderr, "Error: Unrecognized option '%s'. Use --help for usage.\n", arg.c_str());
+            return -1;
         } else {
             pos_args.push_back(arg);
         }
@@ -151,27 +155,33 @@ int parseArguments(int argc,char *argv[])
     };
 
     if (!g_use_custom_matrix) {
-        if (pos_args.size() < 6) {
-            printf("Error: Missing required generated-matrix arguments. Found %zu, expected at least 6.\n", pos_args.size());
+        if (pos_args.size() != 6) {
+            printf("Error: Expected 6 generated-matrix arguments, got %zu. Use --help for usage.\n", pos_args.size());
             return -1;
         }
-        m = atol(pos_args[0].c_str());
-        n = atol(pos_args[1].c_str());
+        if (!cli::positive_integer(pos_args[0], "m", m) ||
+            !cli::positive_integer(pos_args[1], "n", n)) return -1;
         if (is_auto_token(pos_args[2])) {
             rank = std::min(m, n);
         } else {
-            rank = atol(pos_args[2].c_str());
+            if (!cli::positive_integer(pos_args[2], "rank", rank)) return -1;
         }
         spectrum_type = pos_args[3];
-        s_max = atof(pos_args[4].c_str());
-        s_min = atof(pos_args[5].c_str());
+        if (!cli::positive_real(pos_args[4], "s_max", s_max) ||
+            !cli::positive_real(pos_args[5], "s_min", s_min)) return -1;
+        if (s_max < s_min) {
+            std::fprintf(stderr, "Error: s_max must be greater than or equal to s_min.\n");
+            return -1;
+        }
     } else {
-        if (pos_args.size() < 3) {
+        if (pos_args.size() != 3) {
             printf("Error: Missing required matrix-file arguments. Expected <m|auto> <n|auto> <rank|auto>.\n");
             return -1;
         }
         bool m_auto = is_auto_token(pos_args[0]);
         bool n_auto = is_auto_token(pos_args[1]);
+        if ((!m_auto && !cli::positive_integer(pos_args[0], "m", m)) ||
+            (!n_auto && !cli::positive_integer(pos_args[1], "n", n))) return -1;
         if (m_auto || n_auto) {
             if (g_matrix_file_format == MatrixFileFormat::Binary) {
                 printf("Error: Binary matrix files require explicit m and n.\n");
@@ -182,16 +192,18 @@ int parseArguments(int argc,char *argv[])
                           ? infer_libsvm_shape(g_matrix_file_path, inferred_rows, inferred_cols)
                           : infer_text_matrix_shape(g_matrix_file_path, g_matrix_file_layout, inferred_rows, inferred_cols);
             if (!ok) return -1;
+            if ((!m_auto && m != inferred_rows) || (!n_auto && n != inferred_cols)) {
+                std::fprintf(stderr, "Error: Explicit dimensions do not match the matrix file (%ld x %ld).\n",
+                             inferred_rows, inferred_cols);
+                return -1;
+            }
             m = inferred_rows;
             n = inferred_cols;
-        } else {
-            m = atol(pos_args[0].c_str());
-            n = atol(pos_args[1].c_str());
         }
         if (is_auto_token(pos_args[2])) {
             rank = std::min(m, n);
         } else {
-            rank = atol(pos_args[2].c_str());
+            if (!cli::positive_integer(pos_args[2], "rank", rank)) return -1;
         }
         spectrum_type = "custom";
         s_max = 1.0f;
@@ -222,8 +234,9 @@ int parseArguments(int argc,char *argv[])
         }
     }
 
-    if (m <= 0 || n <= 0 || rank <= 0 || rank > std::min(m, n)) {
-        printf("Error: invalid dimensions/rank. Require m>0, n>0, 0<rank<=min(m,n).\n");
+    if (m <= 0 || n <= 0 || m > INT_MAX || n > INT_MAX ||
+        rank <= 0 || rank > std::min(m, n)) {
+        printf("Error: Require dimensions in [1, INT_MAX] and 0<rank<=min(m,n).\n");
         return -1;
     }
 
@@ -344,13 +357,11 @@ float stopTimer()
 
 int main(int argc,char *argv[])
 {
-    if(parseArguments(argc, argv)==-1)
-        return 0;
-    bool stop_condition_met = false;
+    const int parse_status = parseArguments(argc, argv);
+    if (parse_status != 0) return parse_status > 0 ? EXIT_SUCCESS : EXIT_FAILURE;
     const size_t mn = std::min(m, n);
     std::cout << "Constant mn: " << mn << std::endl;
     const size_t real_rank = rank; 
-    int current_m = m; 
     if (!g_use_custom_matrix) {
         printf("Creating a large low-rank matrix of size %ld x %ld with rank %ld.\n", m, n, real_rank);
     } else {
@@ -365,7 +376,6 @@ int main(int argc,char *argv[])
     float one = 1.0f;
     float zero = 0.0f;
     float minus_one = -1.0f;
-    size_t accumulated_rank = 0;
     // 创建唯一的随机数生成器
     curandGenerator_t main_gen;
     curandCreateGenerator(&main_gen, CURAND_RNG_PSEUDO_DEFAULT);
@@ -790,5 +800,6 @@ int main(int argc,char *argv[])
     cusolverDnDestroy(cusolverHandle);
 
     printf("\n=== cusolverDnXgesvdr Test completed ===\n");
-    return 0;
+    return (gesvdr_status == CUSOLVER_STATUS_SUCCESS && info_host == 0)
+               ? EXIT_SUCCESS : EXIT_FAILURE;
 }
