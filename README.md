@@ -2,6 +2,8 @@
 
 This repository is a standalone bundle for the CUDA implementation of **UnifaSVD**, an adaptive mixed-precision low-rank SVD system, together with cuSOLVER-based baseline implementations for comparison.
 
+Last updated: 2026-10-26.
+
 ## Contents
 
 - `UnifaSVD.cu` — Main implementation of the UnifaSVD system (renamed from `AP_HQB-SVD-HGTSQR-sys.cu`).
