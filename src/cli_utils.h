@@ -8,7 +8,6 @@
 #include <limits>
 #include <string>
 
-// Host-only validation shared by the benchmark command-line interfaces.
 namespace cli {
 
 inline bool help_requested(int argc, char* argv[]) {
@@ -23,7 +22,6 @@ inline bool positive_integer(const std::string& text, const char* name, long& va
     char* end = nullptr;
     errno = 0;
     const long parsed = std::strtol(text.c_str(), &end, 10);
-    // Several downstream cuBLAS/QR calls use 32-bit dimensions.
     if (text.empty() || end == text.c_str() || *end != '\0' || errno == ERANGE ||
         parsed <= 0 || parsed > INT_MAX) {
         std::fprintf(stderr, "Error: %s must be an integer in [1, %d], got '%s'.\n",
@@ -61,4 +59,4 @@ inline bool boolean(const std::string& text, bool& value) {
     return true;
 }
 
-}  // namespace cli
+}

@@ -1,5 +1,3 @@
-// UnifaSVD benchmark: synthetic/file input, adaptive QB reduction and SVD.
-// eps controls panel truncation; it is not a final reconstruction-error bound.
 #include <iostream>
 #include <cuda.h>
 #include <cublas_v2.h>
@@ -49,23 +47,18 @@ float s_max;
 float s_min;
 std::string precision_str; 
 bool debug_mode = false;
-bool fast_mode = false; // Prefer FP32 internal operations for float runs.
+bool fast_mode = false;
 static constexpr double kRFinalQrRatioThreshold = 1.0; // n/final_rank 超过该阈值时跳过 Step4 QR
 
 
-// Controls refinement checks in the eigenvalue-based SVD path.
 enum class AccuracyLevel { Low = 0, Medium = 1, High = 2 };
 static AccuracyLevel g_accuracy = AccuracyLevel::Medium;
 
-// Rank classification used to select the direct or QB path.
 enum class RankType { Unknown = 0, Full = 1, Low = 2 };
 static RankType g_rank_type = RankType::Unknown;
 
-// Pad matrix rows when needed by the TSQR kernels.
 static bool g_padding_enabled = true;
-// Fixed-rank runs keep full panels unless --allow-rank-drop is requested.
 static bool g_force_full_rank = true;
-// Unknown-rank mode uses rank as an upper bound and enables adaptive stopping.
 static bool g_unknown_rank_mode = false;
 static bool g_unknown_rank_stage2 = false;
 static bool g_energy_criterion_enabled = false;
@@ -73,7 +66,6 @@ static double g_energy_tau = -1.0;
 static bool g_tail_criterion_enabled = false;
 static double g_tail_norm_eps = -1.0;
 
-// Select singular values and the requested singular vectors.
 enum class ComputeVectors { S_Only = 0, U_Only = 1, Vt_Only = 2, US = 3, SVt = 4, All = 5 };
 static ComputeVectors g_compute_vectors = ComputeVectors::All;
 

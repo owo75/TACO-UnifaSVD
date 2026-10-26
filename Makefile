@@ -37,7 +37,6 @@ $(TARGETS): %: %.o
 	@echo "--- Compiling $< ---"
 	$(NVCC) $(NVCC_FLAGS) -MMD -MP -c $< -o $@
 
-# These tests exercise help and rejected inputs without initializing CUDA.
 tests/test_matrix_io: tests/test_matrix_io.o
 	$(NVCC) $(ARCH_FLAGS) $(WARN_FLAGS) $^ -o $@ $(LDFLAGS)
 

@@ -1,4 +1,3 @@
-// Host-only input checks. No device allocations or CUDA calls are performed.
 #include "matrix_io.h"
 #include "cli_utils.h"
 #include <filesystem>

@@ -15,8 +15,6 @@
 enum class MatrixFileFormat { Text = 0, Binary = 1, LibSVM = 2 };
 enum class MatrixFileLayout { RowMajor = 0, ColumnMajor = 1 };
 
-// A LIBSVM label is ignored; each remaining token must be index:value.
-// Report malformed data instead of allowing conversion exceptions to escape.
 inline bool parse_libsvm_feature(const std::string& token, const std::string& path,
                                 long int& feature, double& value)
 {
@@ -31,7 +29,6 @@ inline bool parse_libsvm_feature(const std::string& token, const std::string& pa
             if (index_end == index_text.size() && value_end == value_text.size() &&
                 feature > 0 && std::isfinite(value)) return true;
         } catch (const std::exception&) {
-            // Invalid and out-of-range numeric fields share the same diagnostic.
         }
     }
     std::fprintf(stderr, "[Error] Invalid LIBSVM token '%s' in '%s'.\n",
@@ -179,7 +176,7 @@ inline bool read_matrix_libsvm(const std::string& path,
     while (std::getline(ifs, line)) {
         std::istringstream iss(line);
         std::string token;
-        if (!(iss >> token)) continue;  // Match shape inference: skip blank lines.
+        if (!(iss >> token)) continue;
         if (row >= rows_input) {
             std::printf("[Error] LIBSVM file '%s' has more rows than expected (%ld).\n", path.c_str(), rows_input);
             return false;

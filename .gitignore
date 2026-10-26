@@ -15,7 +15,6 @@ cusolverDnXgesvdr
 # OS
 .DS_Store
 
-# Python test artifacts
 __pycache__/
 *.pyc
 tests/test_matrix_io

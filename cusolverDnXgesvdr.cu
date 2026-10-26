@@ -1,5 +1,3 @@
-// Randomized-SVD benchmark. Half/BF16 modes quantize inputs and time output
-// casts; the cuSOLVER factorization itself uses FP32.
 #include <iostream>
 #include <cuda.h>
 #include <cuda_runtime.h>

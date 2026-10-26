@@ -1,5 +1,3 @@
-"""Command-line regressions that must finish before CUDA initialization."""
-
 from pathlib import Path
 import subprocess
 import tempfile
@@ -24,7 +22,7 @@ class CommandLineTests(unittest.TestCase):
 
     def assert_rejected(self, program, args, diagnostic="Error"):
         result = self.run_program(program, args)
-        self.assertGreater(result.returncode, 0, result.stdout)  # A crash is a failure, too.
+        self.assertGreater(result.returncode, 0, result.stdout)
         self.assertIn(diagnostic, result.stdout)
         self.assertNotIn("terminate called", result.stdout)
         self.assertNotIn("CUDA error", result.stdout)
@@ -60,7 +58,7 @@ class CommandLineTests(unittest.TestCase):
                     bad_args[spectrum_max_index] = invalid
                     self.assert_rejected(program, bad_args)
             bad_args = args.copy()
-            bad_args[spectrum_max_index] = "1e-6"  # Smaller than s_min.
+            bad_args[spectrum_max_index] = "1e-6"
             self.assert_rejected(program, bad_args)
 
     def test_full_svd_rejects_wide_matrices_and_impossible_rank(self):
